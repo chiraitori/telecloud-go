@@ -80,7 +80,7 @@ func verifySigV4Header(r *http.Request, authHeader, secretKey string) error {
 
 	payloadHash := r.Header.Get("X-Amz-Content-Sha256")
 	if payloadHash == "" {
-		payloadHash = emptySHA256Hex()
+		return errors.New("missing x-amz-content-sha256")
 	}
 
 	canonicalRequest, err := canonicalSigV4Request(r, signedHeaders, payloadHash, nil)
@@ -311,7 +311,19 @@ func canonicalURI(r *http.Request) string {
 	if path == "" {
 		return "/"
 	}
-	return path
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		unescaped, err := url.PathUnescape(segment)
+		if err != nil {
+			unescaped = segment
+		}
+		segments[i] = sigV4URLEncode(unescaped, true)
+	}
+	return strings.Join(segments, "/")
 }
 
 func canonicalQueryString(values url.Values, ignored map[string]bool) string {
@@ -379,7 +391,10 @@ func canonicalAmzHeaders(header http.Header) string {
 }
 
 func canonicalSigV2Resource(r *http.Request) string {
-	resource := canonicalURI(r)
+	resource := r.URL.EscapedPath()
+	if resource == "" {
+		resource = "/"
+	}
 	subresources := []string{
 		"acl", "cors", "delete", "lifecycle", "location", "logging", "notification",
 		"partNumber", "policy", "requestPayment", "response-cache-control",
@@ -408,10 +423,30 @@ func canonicalSigV2Resource(r *http.Request) string {
 }
 
 func awsURLEncode(value string) string {
-	encoded := url.QueryEscape(value)
-	encoded = strings.ReplaceAll(encoded, "+", "%20")
-	encoded = strings.ReplaceAll(encoded, "%7E", "~")
-	return encoded
+	return sigV4URLEncode(value, true)
+}
+
+func sigV4URLEncode(value string, encodeSlash bool) string {
+	var b strings.Builder
+	for _, c := range []byte(value) {
+		if isSigV4Unreserved(c) {
+			b.WriteByte(c)
+			continue
+		}
+		if c == '/' && !encodeSlash {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
+}
+
+func isSigV4Unreserved(c byte) bool {
+	return (c >= 'A' && c <= 'Z') ||
+		(c >= 'a' && c <= 'z') ||
+		(c >= '0' && c <= '9') ||
+		c == '-' || c == '.' || c == '_' || c == '~'
 }
 
 func hmacSHA256(key []byte, value string) []byte {
