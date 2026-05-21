@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"bufio"
 	"crypto/hmac"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -8,6 +9,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -141,6 +144,42 @@ func (w *rangeStatusWriter) Write(b []byte) (int, error) {
 		w.WriteHeader(http.StatusPartialContent)
 	}
 	return w.ResponseWriter.Write(b)
+}
+
+func (w *rangeStatusWriter) ReadFrom(r io.Reader) (int64, error) {
+	if !w.wroteHeader && w.Header().Get("Content-Range") != "" {
+		w.WriteHeader(http.StatusPartialContent)
+	}
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(r)
+	}
+	return io.Copy(w.ResponseWriter, r)
+}
+
+func (w *rangeStatusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *rangeStatusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return h.Hijack()
+}
+
+func (w *rangeStatusWriter) Push(target string, opts *http.PushOptions) error {
+	p, ok := w.ResponseWriter.(http.Pusher)
+	if !ok {
+		return http.ErrNotSupported
+	}
+	return p.Push(target, opts)
+}
+
+func (w *rangeStatusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func applyCORSHeaders(w http.ResponseWriter, r *http.Request) {
@@ -288,18 +327,20 @@ func verifySigV2Header(r *http.Request, authHeader, secretKey string) error {
 	}
 
 	date := r.Header.Get("Date")
-	if date == "" {
-		date = r.Header.Get("X-Amz-Date")
-	}
-	if date == "" {
+	amzDate := r.Header.Get("X-Amz-Date")
+	if date == "" && amzDate == "" {
 		return errors.New("missing sigv2 date")
+	}
+	dateLine := date
+	if amzDate != "" {
+		dateLine = ""
 	}
 
 	stringToSign := strings.Join([]string{
 		r.Method,
 		r.Header.Get("Content-MD5"),
 		r.Header.Get("Content-Type"),
-		date,
+		dateLine,
 		canonicalAmzHeaders(r.Header) + canonicalSigV2Resource(r),
 	}, "\n")
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"mime"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -259,7 +260,7 @@ func (b *TelecloudBackend) HeadObject(bucketName, objectName string) (*gofakes3.
 		Name:     objectName,
 		Metadata: metadata,
 		Size:     file.Size,
-		Contents: io.NopCloser(strings.NewReader("")),
+		Contents: http.NoBody,
 	}, nil
 }
 
