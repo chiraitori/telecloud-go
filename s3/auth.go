@@ -70,7 +70,7 @@ func verifySigV4Header(r *http.Request, authHeader, secretKey string) error {
 		return errors.New("missing sigv4 authorization fields")
 	}
 
-	requestTime, err := parseAmzTime(r.Header.Get("X-Amz-Date"))
+	requestTime, err := sigV4RequestTime(r, signedHeaders)
 	if err != nil {
 		return err
 	}
@@ -257,19 +257,37 @@ func compareSigV4(signature, credential string, requestTime time.Time, canonical
 		hex.EncodeToString(sha256Bytes([]byte(canonicalRequest))),
 	}, "\n")
 
-	expected := hex.EncodeToString(sigV4SigningHMAC(secretKey, scope, stringToSign))
+	expected := sigV4SigningHMAC(secretKey, scope, stringToSign)
 	provided, err := hex.DecodeString(signature)
 	if err != nil {
 		return err
 	}
-	expectedBytes, err := hex.DecodeString(expected)
-	if err != nil {
-		return err
-	}
-	if !hmac.Equal(expectedBytes, provided) {
+	if !hmac.Equal(expected, provided) {
 		return errors.New("sigv4 signature mismatch")
 	}
 	return nil
+}
+
+func sigV4RequestTime(r *http.Request, signedHeaders string) (time.Time, error) {
+	if amzDate := r.Header.Get("X-Amz-Date"); amzDate != "" {
+		return parseAmzTime(amzDate)
+	}
+	if date := r.Header.Get("Date"); date != "" {
+		if !signedHeaderContains(signedHeaders, "date") {
+			return time.Time{}, errors.New("date header is not signed")
+		}
+		return parseAmzTime(date)
+	}
+	return time.Time{}, errors.New("missing x-amz-date or date")
+}
+
+func signedHeaderContains(signedHeaders, name string) bool {
+	for _, header := range strings.Split(signedHeaders, ";") {
+		if strings.EqualFold(strings.TrimSpace(header), name) {
+			return true
+		}
+	}
+	return false
 }
 
 func sigV4Scope(credential string, requestTime time.Time) (string, error) {
