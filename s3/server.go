@@ -58,7 +58,9 @@ func NewHandler(cfg *config.Config) http.Handler {
 			dbAccessKey := database.GetSetting("s3_access_key")
 			if accessKey == dbAccessKey && dbAccessKey != "" {
 				username = database.GetSetting("admin_username")
-				if username == "" { username = "admin" }
+				if username == "" {
+					username = "admin"
+				}
 				isAdmin = true
 			} else {
 				var child struct {
@@ -86,11 +88,11 @@ func NewHandler(cfg *config.Config) http.Handler {
 		// We want to force all requests to be treated as if they are against the "telecloud" bucket.
 		path := strings.TrimPrefix(r.URL.Path, "/s3")
 		path = strings.TrimPrefix(path, "/")
-		
+
 		if path != "" {
 			parts := strings.Split(path, "/")
 			if len(parts) > 0 {
-				// If the first part is a known bucket name or just any bucket name, 
+				// If the first part is a known bucket name or just any bucket name,
 				// we strip it to treat the rest as the object key.
 				// For Telecloud, we only ever "really" have one bucket called "telecloud".
 				if parts[0] == "telecloud" || parts[0] == username || parts[0] == "admin" {
@@ -98,12 +100,36 @@ func NewHandler(cfg *config.Config) http.Handler {
 				}
 			}
 		}
-		
+
 		// Reconstruct the path to always be /telecloud/<key>
 		r.URL.Path = "/" + "telecloud/" + strings.TrimPrefix(path, "/")
 
 		backend := NewBackend(cfg, username, isAdmin)
 		faker := gofakes3.New(backend)
+		if r.Header.Get("Range") != "" {
+			faker.Server().ServeHTTP(&rangeStatusWriter{ResponseWriter: w}, r)
+			return
+		}
 		faker.Server().ServeHTTP(w, r)
 	})
+}
+
+type rangeStatusWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+}
+
+func (w *rangeStatusWriter) WriteHeader(statusCode int) {
+	if statusCode == http.StatusOK && w.Header().Get("Content-Range") != "" {
+		statusCode = http.StatusPartialContent
+	}
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *rangeStatusWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader && w.Header().Get("Content-Range") != "" {
+		w.WriteHeader(http.StatusPartialContent)
+	}
+	return w.ResponseWriter.Write(b)
 }

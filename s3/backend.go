@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"os"
 	"path"
@@ -191,6 +192,7 @@ func (b *TelecloudBackend) GetObject(bucketName, objectName string, rangeRequest
 
 	rs, err := tgclient.GetTelegramFileReader(context.Background(), file, b.cfg)
 	if err != nil {
+		log.Printf("[S3] GetObject reader failed user=%s key=%q file_id=%d: %v", b.username, objectName, file.ID, err)
 		return nil, err
 	}
 
@@ -203,9 +205,10 @@ func (b *TelecloudBackend) GetObject(bucketName, objectName string, rangeRequest
 
 	var body io.ReadCloser
 	size := file.Size
+	var contentRange *gofakes3.ObjectRange
 
 	if rangeRequest != nil {
-		contentRange, err := rangeRequest.Range(size)
+		contentRange, err = rangeRequest.Range(size)
 		if err != nil {
 			rs.Close()
 			return nil, err
@@ -216,7 +219,6 @@ func (b *TelecloudBackend) GetObject(bucketName, objectName string, rangeRequest
 			return nil, err
 		}
 		body = &closerReader{r: io.LimitReader(rs, contentRange.Length), c: rs}
-		size = contentRange.Length
 	} else {
 		body = rs
 	}
@@ -225,6 +227,7 @@ func (b *TelecloudBackend) GetObject(bucketName, objectName string, rangeRequest
 		Name:     objectName,
 		Metadata: metadata,
 		Size:     size,
+		Range:    contentRange,
 		Contents: body,
 	}, nil
 }
@@ -256,7 +259,7 @@ func (b *TelecloudBackend) HeadObject(bucketName, objectName string) (*gofakes3.
 		Name:     objectName,
 		Metadata: metadata,
 		Size:     file.Size,
-		Contents: nil, // Optimization: HeadObject doesn't need to read content
+		Contents: io.NopCloser(strings.NewReader("")),
 	}, nil
 }
 
