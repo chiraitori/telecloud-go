@@ -44,7 +44,7 @@ func corsAllowedOrigin(origin string) (bool, string) {
 		}
 	}
 	if allowedOrigins == "" {
-		return false, ""
+		return true, "*"
 	}
 
 	for _, item := range strings.Split(allowedOrigins, ",") {
@@ -52,7 +52,7 @@ func corsAllowedOrigin(origin string) (bool, string) {
 		switch allowed {
 		case "":
 			continue
-		case "*":
+		case "*", "0.0.0.0":
 			return true, "*"
 		case origin:
 			return true, origin
