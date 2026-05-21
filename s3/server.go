@@ -23,6 +23,10 @@ func NewHandler(cfg *config.Config) http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		if !corsAllowed {
+			http.Error(w, "CORS origin not allowed", http.StatusForbidden)
+			return
+		}
 
 		if database.GetSetting("s3_enabled") != "true" {
 			http.Error(w, "S3 API is disabled", http.StatusForbidden)

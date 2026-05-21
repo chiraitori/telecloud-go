@@ -8,8 +8,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,7 +90,10 @@ func verifySigV4Header(r *http.Request, authHeader, secretKey string) error {
 		return err
 	}
 
-	return compareSigV4(signature, credential, requestTime, canonicalRequest, secretKey)
+	if err := compareSigV4(signature, credential, requestTime, canonicalRequest, secretKey); err != nil {
+		return err
+	}
+	return validateSigV4PayloadHash(r, payloadHash)
 }
 
 func verifySigV4Presigned(r *http.Request, accessKey, secretKey string) error {
@@ -288,6 +293,74 @@ func signedHeaderContains(signedHeaders, name string) bool {
 		}
 	}
 	return false
+}
+
+func validateSigV4PayloadHash(r *http.Request, payloadHash string) error {
+	if payloadHash == "UNSIGNED-PAYLOAD" {
+		return nil
+	}
+	if len(payloadHash) != 64 {
+		return errors.New("invalid x-amz-content-sha256")
+	}
+	if _, err := hex.DecodeString(payloadHash); err != nil {
+		return errors.New("invalid x-amz-content-sha256")
+	}
+
+	if r.Body == nil || r.Body == http.NoBody {
+		if !strings.EqualFold(payloadHash, emptySHA256Hex()) {
+			return errors.New("payload hash mismatch")
+		}
+		return nil
+	}
+
+	tmp, err := os.CreateTemp("", "telecloud-s3-payload-*")
+	if err != nil {
+		return err
+	}
+	keepTemp := false
+	defer func() {
+		if !keepTemp {
+			tmp.Close()
+			os.Remove(tmp.Name())
+		}
+	}()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmp, hasher), r.Body); err != nil {
+		return err
+	}
+	if err := r.Body.Close(); err != nil {
+		return err
+	}
+
+	actual := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(actual, payloadHash) {
+		return errors.New("payload hash mismatch")
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+
+	keepTemp = true
+	r.Body = &tempPayloadBody{File: tmp, name: tmp.Name()}
+	r.GetBody = func() (io.ReadCloser, error) {
+		return os.Open(tmp.Name())
+	}
+	return nil
+}
+
+type tempPayloadBody struct {
+	*os.File
+	name string
+}
+
+func (b *tempPayloadBody) Close() error {
+	err := b.File.Close()
+	removeErr := os.Remove(b.name)
+	if err != nil {
+		return err
+	}
+	return removeErr
 }
 
 func sigV4Scope(credential string, requestTime time.Time) (string, error) {

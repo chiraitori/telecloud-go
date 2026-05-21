@@ -4,10 +4,19 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"telecloud/database"
+	"time"
 )
 
 const defaultS3CORSAllowedHeaders = "Authorization, Content-Type, Content-MD5, Range, X-Amz-Content-Sha256, X-Amz-Date, X-Amz-Security-Token, X-Amz-User-Agent, X-Amz-Copy-Source, X-Amz-Metadata-Directive, X-Amz-Acl, X-Amz-Meta-*"
+const s3CORSAllowlistCacheTTL = 30 * time.Second
+
+var s3CORSAllowlistCache struct {
+	sync.Mutex
+	value     string
+	expiresAt time.Time
+}
 
 func applyCORSHeaders(w http.ResponseWriter, r *http.Request) bool {
 	origin := r.Header.Get("Origin")
@@ -29,7 +38,11 @@ func applyCORSHeaders(w http.ResponseWriter, r *http.Request) bool {
 
 	requestedHeaders := r.Header.Get("Access-Control-Request-Headers")
 	if requestedHeaders != "" {
-		w.Header().Set("Access-Control-Allow-Headers", requestedHeaders)
+		allowedHeaders, ok := allowedCORSRequestHeaders(requestedHeaders)
+		if !ok {
+			return false
+		}
+		w.Header().Set("Access-Control-Allow-Headers", strings.Join(allowedHeaders, ", "))
 		return true
 	}
 	w.Header().Set("Access-Control-Allow-Headers", defaultS3CORSAllowedHeaders)
@@ -37,14 +50,9 @@ func applyCORSHeaders(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func corsAllowedOrigin(origin string) (bool, string) {
-	allowedOrigins := strings.TrimSpace(os.Getenv("S3_CORS_ALLOWED_ORIGINS"))
-	if database.RODB != nil {
-		if dbAllowedOrigins := strings.TrimSpace(database.GetSetting("s3_cors_allowed_origins")); dbAllowedOrigins != "" {
-			allowedOrigins = dbAllowedOrigins
-		}
-	}
+	allowedOrigins := resolvedCORSAllowedOrigins()
 	if allowedOrigins == "" {
-		return true, "*"
+		return false, ""
 	}
 
 	for _, item := range strings.Split(allowedOrigins, ",") {
@@ -59,6 +67,59 @@ func corsAllowedOrigin(origin string) (bool, string) {
 		}
 	}
 	return false, ""
+}
+
+func resolvedCORSAllowedOrigins() string {
+	envAllowedOrigins := strings.TrimSpace(os.Getenv("S3_CORS_ALLOWED_ORIGINS"))
+	if database.RODB == nil {
+		return envAllowedOrigins
+	}
+
+	now := time.Now()
+	s3CORSAllowlistCache.Lock()
+	defer s3CORSAllowlistCache.Unlock()
+
+	if now.Before(s3CORSAllowlistCache.expiresAt) {
+		return s3CORSAllowlistCache.value
+	}
+
+	allowedOrigins := envAllowedOrigins
+	if dbAllowedOrigins := strings.TrimSpace(database.GetSetting("s3_cors_allowed_origins")); dbAllowedOrigins != "" {
+		allowedOrigins = dbAllowedOrigins
+	}
+	s3CORSAllowlistCache.value = allowedOrigins
+	s3CORSAllowlistCache.expiresAt = now.Add(s3CORSAllowlistCacheTTL)
+	return allowedOrigins
+}
+
+func allowedCORSRequestHeaders(requestedHeaders string) ([]string, bool) {
+	requested := strings.Split(requestedHeaders, ",")
+	allowed := make([]string, 0, len(requested))
+	for _, header := range requested {
+		header = strings.TrimSpace(header)
+		if header == "" {
+			continue
+		}
+		if !isAllowedCORSHeader(header) {
+			return nil, false
+		}
+		allowed = append(allowed, header)
+	}
+	return allowed, true
+}
+
+func isAllowedCORSHeader(header string) bool {
+	header = strings.ToLower(strings.TrimSpace(header))
+	for _, allowed := range strings.Split(defaultS3CORSAllowedHeaders, ",") {
+		allowed = strings.ToLower(strings.TrimSpace(allowed))
+		if allowed == header || allowed == "*" {
+			return true
+		}
+		if strings.HasSuffix(allowed, "*") && strings.HasPrefix(header, strings.TrimSuffix(allowed, "*")) {
+			return true
+		}
+	}
+	return false
 }
 
 func appendVaryHeader(w http.ResponseWriter, values ...string) {
