@@ -224,6 +224,8 @@ func (b *TelecloudBackend) GetObject(bucketName, objectName string, rangeRequest
 		body = rs
 	}
 
+	// Keep Size as the full object size. gofakes3 writes ranged Content-Length
+	// from Object.Range.Length and uses Size as the total in Content-Range.
 	return &gofakes3.Object{
 		Name:     objectName,
 		Metadata: metadata,
