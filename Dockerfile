@@ -24,7 +24,7 @@ COPY . .
 RUN if [ -d .git ]; then git submodule update --init --recursive; else echo "Not a git repository, skipping submodule init"; fi
 
 # Build frontend (Tailwind + bundle assets via npm)
-RUN cd web && sed -i 's/\r$//' build-frontend.sh && bash build-frontend.sh 1
+RUN cd web && sed -i 's/\r$//' build-frontend.sh && bash build-frontend.sh
 
 # Build Go binary for TARGET architecture
 ARG VERSION=dev
