@@ -10,7 +10,7 @@ Hướng dẫn dành cho nhà phát triển và người đóng góp muốn tự
 ### 1. Build từ nguồn
 
 #### Phương pháp 1: Build bằng Docker (Khuyên dùng)
-Docker xử lý toàn bộ quá trình build mà không cần cài đặt Go hay Node.js trên máy.
+Docker xử lý toàn bộ quá trình build mà không cần cài đặt Go hay Bun trên máy.
 1. Clone dự án: `git clone --recursive https://github.com/dabeecao/telecloud-go.git`
 2. Build image: `sudo docker build --build-arg DEFAULT_API_ID=your_api_id --build-arg DEFAULT_API_HASH=your_api_hash -t telecloud:local .`
 3. Chạy image vừa build:
@@ -19,7 +19,7 @@ Docker xử lý toàn bộ quá trình build mà không cần cài đặt Go hay
    ```
 
 #### Phương pháp 2: Build thủ công (Native)
-1. Cài đặt **Golang (1.26+)** và **Bun**.
+1. Cài đặt **Golang (1.26+)** và **Bun** (https://bun.com).
 2. Clone với `--recursive` (Bắt buộc để lấy code frontend):
    `git clone --recursive https://github.com/dabeecao/telecloud-go.git`
 3. Build Frontend:
@@ -67,7 +67,7 @@ Mã nguồn frontend nằm ở repo: [**dabeecao/telecloud-frontend**](https://g
 2. `sudo docker build --build-arg DEFAULT_API_ID=your_api_id --build-arg DEFAULT_API_HASH=your_api_hash -t telecloud:local .`
 
 #### Method 2: Manual Build
-1. Install **Golang (1.26+)** and **Bun**.
+1. Install **Golang (1.26+)** and **Bun** (https://bun.com).
 2. Build frontend in `web/` using `bun install && bun run build.js` (or `make frontend` in root).
 3. Run `go mod tidy` and `go build -o telecloud` in root.
 

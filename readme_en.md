@@ -115,6 +115,7 @@ This project uses amazing libraries:
 * [PDF.js](https://github.com/mozilla/pdf.js): HTML5 PDF reader and viewer.
 * [Prism.js](https://github.com/PrismJS/prism): Lightweight, extensible syntax highlighter.
 * [FontAwesome](https://fontawesome.com): The world's most popular icon set.
+* [Bun](https://bun.com): Fast JavaScript runtime & toolkit (build toolchain).
 * [yt-dlp](https://github.com/yt-dlp/yt-dlp): Audio/video downloader.
 * [aria2](https://github.com/aria2/aria2): Multi-protocol download utility.
 * [Google Fonts (Nunito)](https://fonts.google.com/specimen/Nunito): Modern sans-serif typeface.
