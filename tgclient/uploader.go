@@ -731,10 +731,22 @@ func ProcessCompleteUpload(ctx context.Context, filePath, filename, path, mimeTy
 		partSizes: make([]int64, numParts),
 	}
 
+	success := false
+	var uploadedMsgIDs []int
+	defer func() {
+		if !success {
+			if len(uploadedMsgIDs) > 0 {
+				go DeleteMessages(context.Background(), cfg, uploadedMsgIDs)
+			}
+			if fileID > 0 {
+				database.DB.Exec("DELETE FROM files WHERE id = ?", fileID)
+			}
+		}
+	}()
+
 	parts, uploadFailed := uploadPartsCore(ctx, f, fileSize, uniqueFilename, numParts, cfg, progressTracker)
 
 	// Collect successfully uploaded message IDs for cleanup on any failure path
-	var uploadedMsgIDs []int
 	for _, p := range parts {
 		if p.msgID > 0 {
 			uploadedMsgIDs = append(uploadedMsgIDs, p.msgID)
@@ -742,63 +754,69 @@ func ProcessCompleteUpload(ctx context.Context, filePath, filename, path, mimeTy
 	}
 
 	if uploadFailed != nil {
-		if len(uploadedMsgIDs) > 0 {
-			go DeleteMessages(context.Background(), cfg, uploadedMsgIDs)
-		}
-		database.DB.Exec("DELETE FROM files WHERE id = ?", fileID)
 		if ctx.Err() == nil {
 			UpdateTask(taskID, "error", 0, "upload_part_failed: "+uploadFailed.Error(), owner)
 		}
 		return
 	}
 
-	tx, err := database.DB.Beginx()
-	if err != nil {
-		go DeleteMessages(context.Background(), cfg, uploadedMsgIDs)
-		database.DB.Exec("DELETE FROM files WHERE id = ?", fileID)
-		UpdateTask(taskID, "error", 0, "err_db_tx: "+err.Error(), owner)
-		return
-	}
-	defer tx.Rollback()
+	firstMsgID := parts[0].msgID
 
-	for i, p := range parts {
-		_, err = tx.Exec(
-			"INSERT INTO file_parts (file_id, message_id, part_index, size) VALUES (?, ?, ?, ?)",
-			fileID, p.msgID, i, p.partSize,
-		)
+	if numParts > 1 || (overwrite && existingID > 0) {
+		tx, err := database.DB.Beginx()
 		if err != nil {
-			UpdateTask(taskID, "error", 0, "err_db_part_insert: "+err.Error(), owner)
+			UpdateTask(taskID, "error", 0, "err_db_tx: "+err.Error(), owner)
+			return
+		}
+		defer tx.Rollback()
+
+		if numParts > 1 {
+			for i, p := range parts {
+				_, err = tx.Exec(
+					"INSERT INTO file_parts (file_id, message_id, part_index, size) VALUES (?, ?, ?, ?)",
+					fileID, p.msgID, i, p.partSize,
+				)
+				if err != nil {
+					UpdateTask(taskID, "error", 0, "err_db_part_insert: "+err.Error(), owner)
+					return
+				}
+			}
+		}
+
+		if overwrite && existingID > 0 {
+			msgIDsToDelete, _ := database.GetOrphanedMessages([]int{existingID})
+			tx.Exec("DELETE FROM files WHERE id = ?", existingID)
+			tx.Exec("UPDATE files SET message_id = ?, filename = ? WHERE id = ?", firstMsgID, filename, fileID)
+
+			if len(msgIDsToDelete) > 0 {
+				go DeleteMessages(context.Background(), cfg, msgIDsToDelete)
+			}
+
+			if existingThumb != nil {
+				var count int
+				database.RODB.Get(&count, "SELECT COUNT(*) FROM files WHERE thumb_path = ?", *existingThumb)
+				if count == 0 {
+					os.Remove(*existingThumb)
+				}
+			}
+			uniqueFilename = filename
+		} else {
+			tx.Exec("UPDATE files SET message_id = ? WHERE id = ?", firstMsgID, fileID)
+		}
+
+		if err := tx.Commit(); err != nil {
+			UpdateTask(taskID, "error", 0, "err_db_commit: "+err.Error(), owner)
+			return
+		}
+	} else {
+		_, err = database.DB.Exec("UPDATE files SET message_id = ? WHERE id = ?", firstMsgID, fileID)
+		if err != nil {
+			UpdateTask(taskID, "error", 0, "err_db_update: "+err.Error(), owner)
 			return
 		}
 	}
 
-	firstMsgID := parts[0].msgID
-
-	if overwrite && existingID > 0 {
-		msgIDsToDelete, _ := database.GetOrphanedMessages([]int{existingID})
-		tx.Exec("DELETE FROM files WHERE id = ?", existingID)
-		tx.Exec("UPDATE files SET message_id = ?, filename = ? WHERE id = ?", firstMsgID, filename, fileID)
-
-		if len(msgIDsToDelete) > 0 {
-			go DeleteMessages(context.Background(), cfg, msgIDsToDelete)
-		}
-
-		if existingThumb != nil {
-			var count int
-			database.RODB.Get(&count, "SELECT COUNT(*) FROM files WHERE thumb_path = ?", *existingThumb)
-			if count == 0 {
-				os.Remove(*existingThumb)
-			}
-		}
-		uniqueFilename = filename
-	} else {
-		tx.Exec("UPDATE files SET message_id = ? WHERE id = ?", firstMsgID, fileID)
-	}
-
-	if err := tx.Commit(); err != nil {
-		UpdateTask(taskID, "error", 0, "err_db_commit: "+err.Error(), owner)
-		return
-	}
+	success = true
 
 	localThumb := utils.CreateLocalThumbnail(filePath, mimeType, cfg.FFMPEGPath)
 	if localThumb != nil {
@@ -1043,6 +1061,12 @@ func ProcessRemoteUpload(ctx context.Context, url, path, taskID string, cfg *con
 	var firstMsgID int
 	var lastPartSize int64
 
+	type remotePart struct {
+		msgID    int
+		partSize int64
+	}
+	var remoteParts []remotePart
+
 	for {
 		partFilename := uniqueFilename
 		if size > cfg.MaxPartSize || size == -1 {
@@ -1121,15 +1145,10 @@ func ProcessRemoteUpload(ctx context.Context, url, path, taskID string, cfg *con
 					firstMsgID = msgID
 				}
 
-				// Insert part record
-				_, err = database.DB.Exec(
-					"INSERT INTO file_parts (file_id, message_id, part_index, size) VALUES (?, ?, ?, ?)",
-					fileID, msgID, partIndex, lastPartSize,
-				)
-				if err != nil {
-					UpdateTask(taskID, "error", 0, "err_db_part_insert: "+err.Error(), "")
-					return
-				}
+				remoteParts = append(remoteParts, remotePart{
+					msgID:    msgID,
+					partSize: lastPartSize,
+				})
 				break // Success, break retry loop
 			}
 
@@ -1154,33 +1173,66 @@ func ProcessRemoteUpload(ctx context.Context, url, path, taskID string, cfg *con
 	}
 
 	// Finalize record: update message_id and handle name swap for overwrite
-	if overwrite && existingID > 0 {
-		// Identify messages to delete from Telegram BEFORE deleting the old record
-		msgIDsToDelete, _ := database.GetOrphanedMessages([]int{existingID})
-
-		// Delete old record
-		database.DB.Exec("DELETE FROM files WHERE id = ?", existingID)
-
-		// Rename new record to final name
-		database.DB.Exec("UPDATE files SET message_id = ?, size = ?, filename = ? WHERE id = ?", firstMsgID, totalUploaded, filename, fileID)
-
-		// Clean up old messages in background
-		if len(msgIDsToDelete) > 0 {
-			go DeleteMessages(context.Background(), cfg, msgIDsToDelete)
+	if len(remoteParts) > 1 || (overwrite && existingID > 0) {
+		tx, err := database.DB.Beginx()
+		if err != nil {
+			UpdateTask(taskID, "error", 0, "err_db_tx: "+err.Error(), "")
+			return
 		}
+		defer tx.Rollback()
 
-		// Clean up old thumbnail if not used by other files
-		if existingThumb != nil {
-			var count int
-			database.RODB.Get(&count, "SELECT COUNT(*) FROM files WHERE thumb_path = ?", *existingThumb)
-			if count == 0 {
-				os.Remove(*existingThumb)
+		if len(remoteParts) > 1 {
+			for i, p := range remoteParts {
+				_, err = tx.Exec(
+					"INSERT INTO file_parts (file_id, message_id, part_index, size) VALUES (?, ?, ?, ?)",
+					fileID, p.msgID, i, p.partSize,
+				)
+				if err != nil {
+					UpdateTask(taskID, "error", 0, "err_db_part_insert: "+err.Error(), "")
+					return
+				}
 			}
 		}
 
-		uniqueFilename = filename // For task update
+		if overwrite && existingID > 0 {
+			// Identify messages to delete from Telegram BEFORE deleting the old record
+			msgIDsToDelete, _ := database.GetOrphanedMessages([]int{existingID})
+
+			// Delete old record
+			tx.Exec("DELETE FROM files WHERE id = ?", existingID)
+
+			// Rename new record to final name
+			tx.Exec("UPDATE files SET message_id = ?, size = ?, filename = ? WHERE id = ?", firstMsgID, totalUploaded, filename, fileID)
+
+			// Clean up old messages in background
+			if len(msgIDsToDelete) > 0 {
+				go DeleteMessages(context.Background(), cfg, msgIDsToDelete)
+			}
+
+			// Clean up old thumbnail if not used by other files
+			if existingThumb != nil {
+				var count int
+				database.RODB.Get(&count, "SELECT COUNT(*) FROM files WHERE thumb_path = ?", *existingThumb)
+				if count == 0 {
+					os.Remove(*existingThumb)
+				}
+			}
+
+			uniqueFilename = filename // For task update
+		} else {
+			tx.Exec("UPDATE files SET message_id = ?, size = ? WHERE id = ?", firstMsgID, totalUploaded, fileID)
+		}
+
+		if err := tx.Commit(); err != nil {
+			UpdateTask(taskID, "error", 0, "err_db_commit: "+err.Error(), "")
+			return
+		}
 	} else {
-		database.DB.Exec("UPDATE files SET message_id = ?, size = ? WHERE id = ?", firstMsgID, totalUploaded, fileID)
+		_, err := database.DB.Exec("UPDATE files SET message_id = ?, size = ? WHERE id = ?", firstMsgID, totalUploaded, fileID)
+		if err != nil {
+			UpdateTask(taskID, "error", 0, "err_db_update: "+err.Error(), "")
+			return
+		}
 	}
 
 	// Note: Remote uploads usually don't have a local file for thumbnail generation
@@ -1299,46 +1351,55 @@ func ProcessCompleteUploadSync(ctx context.Context, filePath, filename, path, mi
 		return 0, "", fmt.Errorf("upload parallel parts: %w", uploadFailed)
 	}
 
-	tx, err := database.DB.Beginx()
-	if err != nil {
-		return 0, "", fmt.Errorf("db tx begin: %w", err)
-	}
-	defer tx.Rollback()
-
-	for i, p := range parts {
-		_, err = tx.Exec(
-			"INSERT INTO file_parts (file_id, message_id, part_index, size) VALUES (?, ?, ?, ?)",
-			fileID, p.msgID, i, p.partSize,
-		)
-		if err != nil {
-			return 0, "", fmt.Errorf("db part insert %d: %w", i+1, err)
-		}
-	}
-
 	firstMsgID := parts[0].msgID
 
-	if overwrite && existingID > 0 {
-		msgIDsToDelete, _ := database.GetOrphanedMessages([]int{existingID})
-		tx.Exec("DELETE FROM files WHERE id = ?", existingID)
-		tx.Exec("UPDATE files SET message_id = ?, filename = ? WHERE id = ?", firstMsgID, filename, fileID)
-
-		if len(msgIDsToDelete) > 0 {
-			go DeleteMessages(context.Background(), cfg, msgIDsToDelete)
+	if numParts > 1 || (overwrite && existingID > 0) {
+		tx, err := database.DB.Beginx()
+		if err != nil {
+			return 0, "", fmt.Errorf("db tx begin: %w", err)
 		}
+		defer tx.Rollback()
 
-		if existingThumb != nil {
-			var count int
-			database.RODB.Get(&count, "SELECT COUNT(*) FROM files WHERE thumb_path = ?", *existingThumb)
-			if count == 0 {
-				os.Remove(*existingThumb)
+		if numParts > 1 {
+			for i, p := range parts {
+				_, err = tx.Exec(
+					"INSERT INTO file_parts (file_id, message_id, part_index, size) VALUES (?, ?, ?, ?)",
+					fileID, p.msgID, i, p.partSize,
+				)
+				if err != nil {
+					return 0, "", fmt.Errorf("db part insert %d: %w", i+1, err)
+				}
 			}
 		}
-	} else {
-		tx.Exec("UPDATE files SET message_id = ? WHERE id = ?", firstMsgID, fileID)
-	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, "", fmt.Errorf("db tx commit: %w", err)
+		if overwrite && existingID > 0 {
+			msgIDsToDelete, _ := database.GetOrphanedMessages([]int{existingID})
+			tx.Exec("DELETE FROM files WHERE id = ?", existingID)
+			tx.Exec("UPDATE files SET message_id = ?, filename = ? WHERE id = ?", firstMsgID, filename, fileID)
+
+			if len(msgIDsToDelete) > 0 {
+				go DeleteMessages(context.Background(), cfg, msgIDsToDelete)
+			}
+
+			if existingThumb != nil {
+				var count int
+				database.RODB.Get(&count, "SELECT COUNT(*) FROM files WHERE thumb_path = ?", *existingThumb)
+				if count == 0 {
+					os.Remove(*existingThumb)
+				}
+			}
+		} else {
+			tx.Exec("UPDATE files SET message_id = ? WHERE id = ?", firstMsgID, fileID)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return 0, "", fmt.Errorf("db tx commit: %w", err)
+		}
+	} else {
+		_, err = database.DB.Exec("UPDATE files SET message_id = ? WHERE id = ?", firstMsgID, fileID)
+		if err != nil {
+			return 0, "", fmt.Errorf("db update message_id: %w", err)
+		}
 	}
 
 	success = true
@@ -1645,6 +1706,12 @@ func ProcessRemoteUploadSync(ctx context.Context, url, path, taskID string, cfg 
 	var firstMsgID int
 	var lastPartSize int64
 
+	type remotePart struct {
+		msgID    int
+		partSize int64
+	}
+	var remoteParts []remotePart
+
 	for {
 		partFilename := uniqueFilename
 		if size > cfg.MaxPartSize || size == -1 {
@@ -1724,14 +1791,10 @@ func ProcessRemoteUploadSync(ctx context.Context, url, path, taskID string, cfg 
 					firstMsgID = msgID
 				}
 
-				// Insert part record
-				_, err = database.DB.Exec(
-					"INSERT INTO file_parts (file_id, message_id, part_index, size) VALUES (?, ?, ?, ?)",
-					fileID, msgID, partIndex, lastPartSize,
-				)
-				if err != nil {
-					return 0, "", fmt.Errorf("err_db_part_insert: %w", err)
-				}
+				remoteParts = append(remoteParts, remotePart{
+					msgID:    msgID,
+					partSize: lastPartSize,
+				})
 				break // Success, break retry loop
 			}
 
@@ -1755,22 +1818,51 @@ func ProcessRemoteUploadSync(ctx context.Context, url, path, taskID string, cfg 
 	}
 
 	// Finalize record: update message_id and handle name swap for overwrite
-	if overwrite && existingID > 0 {
-		// Identify messages to delete from Telegram BEFORE deleting the old record
-		msgIDsToDelete, _ := database.GetOrphanedMessages([]int{existingID})
+	if len(remoteParts) > 1 || (overwrite && existingID > 0) {
+		tx, err := database.DB.Beginx()
+		if err != nil {
+			return 0, "", fmt.Errorf("db tx begin: %w", err)
+		}
+		defer tx.Rollback()
 
-		// Delete old record
-		database.DB.Exec("DELETE FROM files WHERE id = ?", existingID)
+		if len(remoteParts) > 1 {
+			for i, p := range remoteParts {
+				_, err = tx.Exec(
+					"INSERT INTO file_parts (file_id, message_id, part_index, size) VALUES (?, ?, ?, ?)",
+					fileID, p.msgID, i, p.partSize,
+				)
+				if err != nil {
+					return 0, "", fmt.Errorf("db part insert %d: %w", i+1, err)
+				}
+			}
+		}
 
-		// Rename new record to final name
-		database.DB.Exec("UPDATE files SET message_id = ?, size = ?, filename = ? WHERE id = ?", firstMsgID, totalUploaded, filename, fileID)
+		if overwrite && existingID > 0 {
+			// Identify messages to delete from Telegram BEFORE deleting the old record
+			msgIDsToDelete, _ := database.GetOrphanedMessages([]int{existingID})
 
-		// Clean up old messages in background
-		if len(msgIDsToDelete) > 0 {
-			go DeleteMessages(context.Background(), cfg, msgIDsToDelete)
+			// Delete old record
+			tx.Exec("DELETE FROM files WHERE id = ?", existingID)
+
+			// Rename new record to final name
+			tx.Exec("UPDATE files SET message_id = ?, size = ?, filename = ? WHERE id = ?", firstMsgID, totalUploaded, filename, fileID)
+
+			// Clean up old messages in background
+			if len(msgIDsToDelete) > 0 {
+				go DeleteMessages(context.Background(), cfg, msgIDsToDelete)
+			}
+		} else {
+			tx.Exec("UPDATE files SET message_id = ?, size = ? WHERE id = ?", firstMsgID, totalUploaded, fileID)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return 0, "", fmt.Errorf("db tx commit: %w", err)
 		}
 	} else {
-		database.DB.Exec("UPDATE files SET message_id = ?, size = ? WHERE id = ?", firstMsgID, totalUploaded, fileID)
+		_, err := database.DB.Exec("UPDATE files SET message_id = ?, size = ? WHERE id = ?", firstMsgID, totalUploaded, fileID)
+		if err != nil {
+			return 0, "", fmt.Errorf("db update message_id: %w", err)
+		}
 	}
 
 	success = true

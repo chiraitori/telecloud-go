@@ -1140,16 +1140,6 @@ func handleBotNewMessage(ctx context.Context, e tg.Entities, msgClass tg.Message
 		return nil
 	}
 
-	_, err = tx.Exec(
-		"INSERT INTO file_parts (file_id, message_id, part_index, size) VALUES (?, ?, ?, ?)",
-		fileID, newMessageID, 0, docSize,
-	)
-	if err != nil {
-		unlockInsert()
-		log.Printf("[BotPool] Failed to insert file part: %v", err)
-		return nil
-	}
-
 	err = tx.Commit()
 	unlockInsert()
 	if err != nil {

@@ -164,7 +164,8 @@ func setupCheckMiddleware() gin.HandlerFunc {
 		if !tgclient.IsSystemReady() {
 			// If the system is currently initializing, show a loading message instead of redirecting to setup
 			if tgclient.IsRunning() {
-				c.Data(http.StatusServiceUnavailable, "text/html; charset=utf-8", []byte(`
+				fmt.Println("[TeleCloud] Telegram client is initializing. Serving 'TeleCloud is starting up' page to:", c.Request.URL.Path)
+				c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(`
 						<!DOCTYPE html><html><head><meta http-equiv="refresh" content="3"><title>Starting up...</title>
 						<style>body{font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8fafc;color:#334155;text-align:center;} h2{margin-bottom:8px;} p{color:#64748b;}</style>
 						</head><body><div><h2>TeleCloud is starting up</h2><p>Please wait a few seconds...</p></div></body></html>
@@ -317,6 +318,12 @@ func gzipMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Only compress when client accepts gzip
 		if !strings.Contains(c.GetHeader("Accept-Encoding"), "gzip") {
+			c.Next()
+			return
+		}
+
+		// Avoid compressing when Telegram is starting up
+		if !tgclient.IsSystemReady() && tgclient.IsRunning() {
 			c.Next()
 			return
 		}

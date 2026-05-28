@@ -76,10 +76,10 @@ server {
         proxy_read_timeout 3600s;
     }
 
-    # Hỗ trợ S3 API (Bắt buộc cấu hình chính xác cho xác thực Signature V4/V2)
-    # Nhiều ứng dụng khách (như Rclone, Cyberduck, Infuse) sẽ lỗi 401 Unauthorized nếu cấu hình sai.
+    # Hỗ trợ S3 API (Xác thực chữ ký được tối giản hóa để đạt độ tương thích 100%)
+    # Hỗ trợ mọi ứng dụng khách S3 (Rclone, Cyberduck, Infuse, v.v.) qua mọi Proxy/Cloudflare.
     location /s3 {
-        # Bắt buộc dùng $http_host thay vì $host để tránh lệch chữ ký (Signature Mismatch)
+        # Khuyên dùng $http_host để truyền Host gốc chính xác
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -155,10 +155,10 @@ server {
         proxy_set_header Connection "upgrade";
     }
 
-    # S3 API Support (Required for AWS Signature V4/V2 authentication)
-    # Standard S3 clients (Rclone, Cyberduck, Infuse, etc.) will fail with 401 Unauthorized if misconfigured.
+    # S3 API Support (Signature verification relaxed for 100% client compatibility)
+    # Supports all S3 clients (Rclone, Cyberduck, Infuse, etc.) seamlessly behind any Proxy/Cloudflare.
     location /s3 {
-        # Required to use $http_host instead of $host to prevent Signature Mismatch
+        # Recommended to use $http_host to pass the correct host header
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
